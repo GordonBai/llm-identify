@@ -464,7 +464,7 @@ def load_dataiter_by_name(dataset_name):
     # dataset: Reddit WritingPrompts dataset
     # we load from local source
     if dataset_name == 'writingprompts':
-        basepath='./writing_prompts'
+        basepath='/data1/ybaiaj/llm-identify/writing-prompts'    # different users may have different basepath
         dataset = kaggle_ds.load_data(basepath)
         ds_iterator = dataset.iterrows()
         _, row_data = next(ds_iterator)
@@ -549,7 +549,7 @@ def main(args):
         args.default_prompt = input_text
 
         term_width = 80
-        for p in range(1):
+        for p in range(5):
             count+=1
             print(f"{i}th prompt, {p}-th rand user: ")
             if args.user_dist =='dense':

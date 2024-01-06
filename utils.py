@@ -9,7 +9,7 @@ def gen_usr_list_dense():
     :return: usr_list_dense.pkl
     """
 
-    magnitude=18
+    magnitude=10
     usr_list=np.empty([2**magnitude], dtype = '<U256', order = 'C')
     for i in range(2**magnitude):
         s_bin=bin(i)
