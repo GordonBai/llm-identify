@@ -43,7 +43,7 @@ def tokenize_and_truncate(example: dict,
     if "t5" in hf_model_name or "T0" in hf_model_name: 
         inputs[0,-1] = 1
     # else: pass
-    example.update({"inputs": inputs})
+    example.update({"inputs": inputs})      # add the tokenized inputs as a new column
     return example
 
 

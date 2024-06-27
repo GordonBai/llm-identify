@@ -78,7 +78,19 @@ def parse_args():
         "--gen_mode",
         type=str,
         default="depth_d",
-        help="depth_d, normal",
+        help="depth_d, normal, dynamic_delta, beam_delta",
+    )
+    parser.add_argument(
+        "--beam_width",
+        type=str,
+        default = 5,
+        help="beam width for beam search to generate the optimal delta"
+    )
+    parser.add_argument(
+        "window_length",
+        type = int,
+        default = 3,
+        help="choose your window length for future-beam-search to generate the optimal delta"
     )
     parser.add_argument(
         "--depth",
@@ -329,6 +341,9 @@ def generate(prompt, args, model=None, device=None, tokenizer=None, userid=None,
     truncation_warning = True if tokd_input["input_ids"].shape[-1] == args.prompt_max_length else False
     redecoded_input = tokenizer.batch_decode(tokd_input["input_ids"], skip_special_tokens=True)[0]
 
+    # # print prompt
+    # print("Prompt is: ",redecoded_input)
+    # print()
 
     torch.manual_seed(args.generation_seed)
     output_without_watermark = generate_without_watermark(**tokd_input)
@@ -515,7 +530,7 @@ def load_text_by_iter(dataset_name,ds_iterator):
                 input_text = row_data['story'][:args.prompt_max_length]
             else:
                 input_text = row_data['story']
-            ipdb.set_trace()
+            #ipdb.set_trace()
         return input_text
 def main(args):
     # Load datasets
@@ -865,9 +880,16 @@ def testppl(args):
 
 
     model, tokenizer, device = load_model(args)
+    model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, offload_folder="offload",
+                                             device_map='auto')
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # model.to(device)
+    # model = model.to(torch.float32)
+
+
 
     # Generate and detect, report to stdout
-    exp_num=10
+    exp_num=200
     result_wm=np.zeros(exp_num)
     result_bl=np.zeros(exp_num)
     for i in range(exp_num):
@@ -882,7 +904,6 @@ def testppl(args):
         # gen_id=2
         userid = usr_list[gen_id]
         input_text=next(ds_iterator)['text'][:args.prompt_max_length]
-
 
         args.default_prompt = input_text
 
@@ -901,20 +922,33 @@ def testppl(args):
         
         
         
-        for i in range(10):
-            # gen_id=random.randint(0, 127)
-            userid=usr_list[gen_id]
-            input_token_num, output_token_num, _, _, decoded_output_without_watermark, decoded_output_with_watermark, watermark_processor,_ = generate(
-                input_text,
-                args,
-                model=model,
-                device=device,
-                tokenizer=tokenizer,
-                userid=userid,
-                index=i)
-            print(i,"-th",decoded_output_with_watermark)
-            # print(i,"-th",decoded_output_without_watermark)
-        print(decoded_output_without_watermark)
+        # for i in range(10):
+        #     # gen_id=random.randint(0, 127)
+        #     userid=usr_list[gen_id]
+        #     input_token_num, output_token_num, _, _, decoded_output_without_watermark, decoded_output_with_watermark, watermark_processor,_ = generate(
+        #         input_text,
+        #         args,
+        #         model=model,
+        #         device=device,
+        #         tokenizer=tokenizer,
+        #         userid=userid,
+        #         index=i)
+        #     print(i,"-th",decoded_output_with_watermark)
+        #     # print(i,"-th",decoded_output_without_watermark)
+        # print(decoded_output_without_watermark)
+        
+        userid=usr_list[gen_id]
+        input_token_num, output_token_num, _, _, decoded_output_without_watermark, decoded_output_with_watermark, watermark_processor,_ = generate(
+            input_text,
+            args,
+            model=model,
+            device=device,
+            tokenizer=tokenizer,
+            userid=userid,
+            index=i)
+        print("watermarked output: ",decoded_output_with_watermark)
+        # print(i,"-th",decoded_output_without_watermark)
+        print("non watermarked output: ", decoded_output_without_watermark)
         
         
         # ppl evaluation
@@ -958,7 +992,7 @@ def testppl(args):
         
         result_wm[i]=ppl_wm
         result_bl[i]=ppl_bl
-        print(baseline_output_wm)
+        #print(baseline_output_wm)
         print(f"baseline ppl{ppl_bl}, delta={args.delta}, watermarked ppl{ppl_wm}")
         
     

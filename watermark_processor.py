@@ -99,8 +99,10 @@ class WatermarkBase:
         redlist_ids = vocab_permutation[greenlist_size:]
 
         self._seed_depth_rng()
-        depth_permutation=torch.randperm(len(greenlist_ids), device=input_ids.device, generator=self.rng)
+        depth_permutation=torch.randperm(len(greenlist_ids), device=input_ids.device, generator=self.rng)       # keep random permuating the greenlist, to get depth score
         depth_green_ids=greenlist_ids[depth_permutation]
+        # when green list length != red list length
+        # our depth_permutation is of green list length
         if len(redlist_ids)!=len(greenlist_ids):
             depth_red_ids=redlist_ids[:-1][depth_permutation]
             #append to tail
@@ -127,6 +129,11 @@ class WatermarkBase:
 
 
 
+    # TODO: implement a function that can retrieve the delta for the current input_ids
+    # and then use this delta in _bias_greenlist_logits function
+    def _get_dynamic_delta(self, input_ids:torch.LongTensor) -> float:
+        raise NotImplementedError
+
 
 class WatermarkLogitsProcessor_with_preferance(WatermarkBase, LogitsProcessor):
 
@@ -139,6 +146,44 @@ class WatermarkLogitsProcessor_with_preferance(WatermarkBase, LogitsProcessor):
             for j in range(len(greenlist_token_ids)):
                 scores[j][d_masks[i]]=scores[j][d_masks[i]]+delta
         return scores
+    
+    # TODO: analyze the logits of the next token, focus on topk instead of greedy
+    def _calculate_beam_delta(self, scores: torch.FloatTensor) -> float:
+        topk_probs, _ = torch.topk(F.softmax(scores, dim=-1), self.beam_width, dim=-1)
+        topk_std = torch.std(topk_probs, dim=-1).mean().item()
+        beam_delta = self.delta * (1 / (1 + topk_std))
+        return beam_delta
+    
+    # TODO: implement beam-search based future prediction, to determine a dynamic delta
+    def _beam_search_predict(self, input_ids, model):
+        beams = [(input_ids, 0)]  # Each element is a tuple of (sequence, cumulative log probability)
+        
+        for _ in range(self.window_length):
+            new_beams = []
+            for seq, cum_log_prob in beams:
+                # Get the logits for the current sequence
+                outputs = model(seq)
+                logits = outputs.logits[:, -1, :]  # Get logits of the last token
+                log_probs = F.log_softmax(logits, dim=-1)
+                
+                topk_log_probs, topk_indices = log_probs.topk(self.beam_width, dim=-1)
+                
+                for log_prob, index in zip(topk_log_probs[0], topk_indices[0]):
+                    new_seq = torch.cat([seq, index.unsqueeze(0).unsqueeze(0)], dim=1)
+                    new_beams.append((new_seq, cum_log_prob + log_prob.item()))
+            
+            # Keep only the top beams
+            beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:self.beam_width]
+        
+        return beams
+
+    def _compute_dynamic_delta(self, beams):
+        log_probs = [beam[1] for beam in beams]
+        variance = np.var(log_probs)
+        
+        dynamic_delta = self.delta / (1 + variance)
+        
+        return dynamic_delta
     
     def _calc_greenlist_mask(self, scores: torch.FloatTensor, greenlist_token_ids) -> torch.BoolTensor:
         # TODO lets see if we can lose this loop
@@ -156,7 +201,7 @@ class WatermarkLogitsProcessor_with_preferance(WatermarkBase, LogitsProcessor):
         # print(greenlist_bias,self.idx_t)
         return scores
 
-    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, model) -> torch.FloatTensor:
         n = len(self.userid)
 
         # preferance = self.userid[(self.idx_t - n * (self.idx_t // n)) % n]  # 1->green ; 0-> red
@@ -187,13 +232,25 @@ class WatermarkLogitsProcessor_with_preferance(WatermarkBase, LogitsProcessor):
             if self.args.gen_mode=='depth_d':
                 batched_d_masks[b_idx] = d_masks
 
-        if self.args.gen_mode !='depth_d':
-            green_tokens_mask = self._calc_greenlist_mask(scores=scores, greenlist_token_ids=batched_greenlist_ids)
-            scores_withnomask=copy.deepcopy(scores)
-            scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask, greenlist_bias=self.delta,decrease_delta=self.decrease_delta)
-        else:
-            scores_withnomask=copy.deepcopy(scores)
+        if self.args.gen_mode =='depth_d':
+            # scores_withnomask=copy.deepcopy(scores)
             scores=self._bias_depth_d_logits(scores=scores,greenlist_token_ids=batched_greenlist_ids,d_masks=d_masks,delta=self.delta)
+        elif self.args.gen_mode =='beam_delta':
+            green_tokens_mask = self._calc_greenlist_mask(scores=scores, greenlist_token_ids=batched_greenlist_ids)
+            # scores_withnomask=copy.deepcopy(scores)
+            beam_delta = self._calculate_beam_delta(scores, input_ids)
+            scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask, greenlist_bias=beam_delta,decrease_delta=self.decrease_delta)
+        elif self.args.gen_mode == "dynamic_delta":
+            # Predict the next tokens using beam search
+            beams = self._beam_search_predict(input_ids, model)
+            dynamic_delta = self._compute_dynamic_delta(beams)
+            green_tokens_mask = self._calc_greenlist_mask(scores=scores, greenlist_token_ids=batched_greenlist_ids)
+            # scores_withnomask=copy.deepcopy(scores)
+            scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask, greenlist_bias=dynamic_delta,decrease_delta=self.decrease_delta)
+        else:
+            green_tokens_mask = self._calc_greenlist_mask(scores=scores, greenlist_token_ids=batched_greenlist_ids)
+            # scores_withnomask=copy.deepcopy(scores)
+            scores = self._bias_greenlist_logits(scores=scores, greenlist_mask=green_tokens_mask, greenlist_bias=self.delta,decrease_delta=self.decrease_delta)
             
         return scores
 
@@ -371,6 +428,8 @@ class WatermarkDetector_with_preferance(WatermarkBase):
             # kl_divergence = -F.kl_div(depth_pd.log(), depth_distribution_score, reduction='mean')
             # sim_score=kl_divergence
             
+            # new total_loss defined
+            # total_loss = torch.sum(depth_pd*sim_score * torch.log(standard_depth_distribution*standard_gr))
             gr_sim_score=np.array(sim_score)
             depth_loss=np.array(depth_loss)
             total_loss=np.array(total_loss)
